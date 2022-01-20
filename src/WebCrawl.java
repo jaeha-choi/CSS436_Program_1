@@ -7,10 +7,9 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.util.Collections;
 import java.util.HashSet;
-import java.util.PriorityQueue;
-import java.util.Queue;
+import java.util.LinkedList;
+import java.util.Stack;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -20,9 +19,8 @@ public class WebCrawl {
 
     private final int hops;
     private final int retries = 3;
-    private final Queue<Page> siteQueue;
+    private final Stack<LinkedList<String>> siteQueueStack;
     private final HashSet<String> visited = new HashSet<>();
-    private final Pattern urlPattern = Pattern.compile("<a href=\"http(.*?)\"");
     private int currHops = 0;
 
     /**
@@ -32,8 +30,8 @@ public class WebCrawl {
      */
     private WebCrawl(int hops) {
         this.hops = hops;
-        // Give the default size of hops, and change to max queue
-        this.siteQueue = new PriorityQueue<>(this.hops, Collections.reverseOrder());
+        this.siteQueueStack = new Stack<>();
+        this.siteQueueStack.add(new LinkedList<>());
     }
 
     /**
@@ -64,7 +62,7 @@ public class WebCrawl {
         }
 
         WebCrawl crawler = new WebCrawl(hops);
-        crawler.siteQueue.add(new Page(startUrl, 0)); // initial hop count is 0
+        crawler.siteQueueStack.peek().add(startUrl);
         crawler.start();
     }
 
@@ -72,30 +70,40 @@ public class WebCrawl {
      * Start crawling the web.
      */
     private void start() {
-        Page currPage;
         String prevUrl = "";
+        String currUrl;
         String tmpLink;
+        LinkedList<String> currSiteQueue;
         int delay = 0;
 
-        while (this.currHops <= this.hops && !this.siteQueue.isEmpty()) {
-            currPage = this.siteQueue.poll();
-            tmpLink = currPage.url;
-            if (!tmpLink.endsWith("/")) tmpLink += "/";
+        while (this.currHops <= this.hops && !this.siteQueueStack.isEmpty()) {
+            currSiteQueue = this.siteQueueStack.peek();
+            while (currSiteQueue.isEmpty()) {
+                this.siteQueueStack.pop();
+                if (this.siteQueueStack.isEmpty()) {
+                    return;
+                }
+                currSiteQueue = this.siteQueueStack.peek();
+            }
 
+            currUrl = currSiteQueue.poll();
+            tmpLink = currUrl;
+            if (!tmpLink.endsWith("/")) tmpLink += "/";
+            this.siteQueueStack.add(new LinkedList<>());
 
             // If retry cap is reached for the same URL, reset
             if (delay >= this.retries) {
                 prevUrl = "";
                 delay = 0;
             } else if (!this.visited.contains(tmpLink)) {
-                if (!prevUrl.equals(currPage.url)) {
+                if (!prevUrl.equals(currUrl)) {
                     delay = 0;
                 }
-                if (this.visitUrl(currPage.url, delay)) {
+                if (this.visitUrl(currUrl, delay)) {
                     this.currHops++;
                 }
                 delay++;
-                prevUrl = currPage.url;
+                prevUrl = currUrl;
             }
         }
 
@@ -110,6 +118,7 @@ public class WebCrawl {
      */
     private boolean visitUrl(String urlStr, int delay) {
         boolean result = false;
+        LinkedList<String> currPageQueue = this.siteQueueStack.peek();
         try {
             TimeUnit.SECONDS.sleep(delay);
             URL url = new URL(urlStr);
@@ -122,12 +131,12 @@ public class WebCrawl {
                 BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
 
                 String line;
-                Matcher matcher = this.urlPattern.matcher("");
                 int counter = 0;
+                Matcher matcher = Pattern.compile("<a\s(.*?)href=\"http(.*?)\"").matcher("");
                 while ((line = reader.readLine()) != null) {
                     matcher.reset(line);
-                    if (matcher.find()) {
-                        this.siteQueue.add(new Page("http" + matcher.group(1), this.currHops + 1));
+                    while (matcher.find()) {
+                        currPageQueue.add("http" + matcher.group(2));
                         counter++;
                     }
                 }
@@ -135,13 +144,16 @@ public class WebCrawl {
                 result = true;
             } else if (respCode == HttpURLConnection.HTTP_MOVED_PERM || respCode == HttpURLConnection.HTTP_MOVED_TEMP) {
                 String newUrl = conn.getHeaderField("Location");
-                System.out.printf("HOP %d\tRedirecting from %s to %s%n", this.currHops, urlStr, newUrl);
-                this.siteQueue.add(new Page(newUrl, this.currHops + 1));
+                if (newUrl.trim().startsWith("http")) {
+                    System.out.printf("HOP %d\tRedirecting from %s to %s%n", this.currHops, urlStr, newUrl);
+                    currPageQueue.addFirst(newUrl);
+                    this.visited.add(urlStr);
+                }
                 return false;
             } else if (500 <= respCode && respCode < 600) {
                 // Add the site to try again
                 System.out.printf("HOP %d\tError from %s\tResponse Code: %d\tRetry: %d%n", this.currHops, urlStr, respCode, delay + 1);
-                this.siteQueue.add(new Page(urlStr, this.currHops + 1));
+                currPageQueue.addFirst(urlStr);
                 // If this wasn't the last retry, don't mark as visited and try again
                 if (delay + 1 < this.retries) return false;
             } else {
@@ -155,16 +167,5 @@ public class WebCrawl {
         if (!urlStr.endsWith("/")) urlStr += "/";
         this.visited.add(urlStr);
         return result;
-    }
-
-    /**
-     * Page record store url with a value to be used for priority queue
-     */
-    private record Page(String url, int priority) implements Comparable<Page> {
-
-        @Override
-        public int compareTo(Page p) {
-            return Integer.compare(this.priority, p.priority);
-        }
     }
 }
